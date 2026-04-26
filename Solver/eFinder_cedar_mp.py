@@ -746,7 +746,7 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
 
             pk = int(peak.strip()) if peak.strip().isdigit() else 0
             exp = float(param.get('Exposure','0.2'))
-            while pk > 255:
+            while pk >= 220:   # >220 risks saturation on subsequent solve
                 exp *= 0.75
                 _set_camera(exp, param.get('Gain','20'))
                 ok = _do_solve(_request_capture())

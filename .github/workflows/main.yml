@@ -48,9 +48,9 @@ jobs:
           source "$HOME/.cargo/env"
           rustup target add aarch64-unknown-linux-gnu
 
-      - name: Install aarch64 linker
+      - name: Install aarch64 linker and protobuf compiler
         run: |
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu protobuf-compiler
 
       - name: Clone cedar-detect
         run: |
@@ -83,11 +83,6 @@ jobs:
       # -----------------------------------------------------------------------
       # Base image
       # -----------------------------------------------------------------------
-      - name: Set up Python 3.13 (matches Trixie)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
       - name: Download official Raspberry Pi OS Lite (Trixie)
         run: |
           wget -q \
