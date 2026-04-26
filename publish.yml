@@ -1,0 +1,31 @@
+name: Publish Image
+
+on:
+  workflow_run:
+    workflows: ["tetra3rs_mp Build on img tetra3rs_mp"]   # MUST match your build workflow name exactly
+    types:
+      - completed
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifact from build
+        uses: actions/download-artifact@v4
+        with:
+          name: 2025-10-01-raspios-trixie-arm64-lite.img.xz   # MUST match artifact name in your build workflow
+          path: ./artifact
+
+      - name: List contents (sanity check)
+        run: ls -lh ./artifact
+
+      - name: Create release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: ./artifact/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
