@@ -1,0 +1,16 @@
+[Unit]
+Description=eFinder first-boot setup
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/efinder/.run_firstrun
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/firstrun.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target
