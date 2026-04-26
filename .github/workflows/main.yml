@@ -334,8 +334,11 @@ jobs:
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
               --prefer-binary pyserial
 
-          # cedar-solve ships cedar_detect_client as part of its tetra3 package.
-          # It also pulls in grpcio as a dependency, so no separate install needed.
+          # cedar-solve and its dependencies (numpy, grpcio) need python3-dev
+          # headers present so pip can build any package that lacks a pre-built
+          # wheel for this platform.  python3-dev is installed here, used, then
+          # purged in the slimming step to keep the image small.
+          sudo chroot /mnt/pi apt-get install -y --no-install-recommends python3-dev
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
               --prefer-binary cedar-solve
 
@@ -569,7 +572,7 @@ jobs:
           sudo chroot /mnt/pi raspi-config nonint do_i2c 0        2>/dev/null || true
           sudo chroot /mnt/pi raspi-config nonint do_serial_cons 1 2>/dev/null || true
 
-          sudo chroot /mnt/pi apt-get purge -y python3-pip 2>/dev/null || true
+          sudo chroot /mnt/pi apt-get purge -y python3-pip python3-dev 2>/dev/null || true
           sudo chroot /mnt/pi apt-get autoremove -y
           sudo chroot /mnt/pi apt-get clean
 
