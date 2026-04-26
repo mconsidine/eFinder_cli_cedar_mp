@@ -64,7 +64,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             cedar-detect/target
-          key: cedar-detect-aarch64-${{ hashFiles('cedar-detect/Cargo.toml') }}
+          key: cedar-detect-aarch64-${{ hashFiles('cedar-detect/Cargo.toml', 'cedar-detect/Cargo.lock') }}
           restore-keys: cedar-detect-aarch64-
 
       - name: Cross-compile cedar-detect-server for aarch64
@@ -97,7 +97,7 @@ jobs:
           echo "=== Starting image customization ==="
 
           IMAGE=2025-10-01-raspios-trixie-arm64-lite.img
-          truncate -s +2048M $IMAGE
+          truncate -s +3072M $IMAGE
 
           LOOP=$(sudo losetup -fP --show $IMAGE)
           echo "Loop device: $LOOP"
@@ -308,6 +308,10 @@ jobs:
 
       - name: Install packages in chroot
         run: |
+          # Ensure DNS works inside the chroot for apt.
+          # Use 8.8.8.8 explicitly in case the runner uses 127.0.0.53 (systemd-resolved)
+          # which is unreachable from inside the chroot.
+          echo 'nameserver 8.8.8.8' | sudo tee /mnt/pi/etc/resolv.conf > /dev/null
           sudo chroot /mnt/pi apt-get update -q
           sudo chroot /mnt/pi apt-get install -y --no-install-recommends \
               python3-pip \
@@ -342,21 +346,6 @@ jobs:
           grep -A 20 'dependencies' cedar-solve/pyproject.toml | head -25
 
       # -----------------------------------------------------------------------
-      # Generate gRPC Python stubs on the host (native speed, no QEMU).
-      # Staged into the image — no protoc or grpcio-tools needed on the Pi.
-      # -----------------------------------------------------------------------
-      - name: Generate Python gRPC stubs (host)
-        run: |
-          pip install grpcio-tools
-          python3 -m grpc_tools.protoc \
-            -I cedar-detect/src/proto \
-            --python_out=Solver \
-            --pyi_out=Solver \
-            --grpc_python_out=Solver \
-            cedar-detect/src/proto/cedar_detect.proto
-          ls -l Solver/cedar_detect_pb2*.py
-
-      # -----------------------------------------------------------------------
       # Download Hipparcos catalogue on the host (fast, no QEMU).
       # Staged into the image so generate_database() finds it inside chroot.
       # -----------------------------------------------------------------------
@@ -389,23 +378,17 @@ jobs:
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
               --prefer-binary grpcio
 
-          # Place cedar-detect-server where CedarDetectClient() expects it:
-          # <site-packages>/tetra3/bin/cedar-detect-server
-          SITE=$(sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
-              -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          sudo mkdir -p /mnt/pi${SITE}/tetra3/bin
+          # Place cedar-detect-server where CedarDetectClient() expects it.
+          # For an editable install, tetra3.__file__ resolves into the cloned
+          # source tree, not site-packages, so use tetra3.__file__ to locate bin/.
+          TETRA3_DIR=$(sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
+              -c "import tetra3, os; print(os.path.dirname(tetra3.__file__))")
+          echo "  tetra3 dir: $TETRA3_DIR"
+          sudo mkdir -p /mnt/pi${TETRA3_DIR}/bin
           sudo install -m 755 \
               /mnt/pi/home/efinder/cedar-detect-bin/cedar-detect-server \
-              /mnt/pi${SITE}/tetra3/bin/cedar-detect-server
-          echo "  cedar-detect-server installed to ${SITE}/tetra3/bin/"
-
-          # Stage gRPC stubs generated on host above
-          sudo install -m 644 Solver/cedar_detect_pb2.py \
-              /mnt/pi/home/efinder/Solver/cedar_detect_pb2.py
-          sudo install -m 644 Solver/cedar_detect_pb2_grpc.py \
-              /mnt/pi/home/efinder/Solver/cedar_detect_pb2_grpc.py
-          sudo install -m 644 Solver/cedar_detect_pb2.pyi \
-              /mnt/pi/home/efinder/Solver/cedar_detect_pb2.pyi 2>/dev/null || true
+              /mnt/pi${TETRA3_DIR}/bin/cedar-detect-server
+          echo "  cedar-detect-server installed to ${TETRA3_DIR}/bin/"
 
           # Verify imports
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
@@ -424,7 +407,7 @@ jobs:
           # the Python script. Written to <tetra3_pkg>/data/t3_fov14_mag8.npz.
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 -c "
           import os, tetra3
-          t3 = tetra3.Tetra3(load_database=None)
+          t3 = tetra3.Tetra3()
           hip_path = os.path.join(os.path.dirname(tetra3.__file__), 'hip_main.dat')
           t3.generate_database(
               max_fov=14,
@@ -440,7 +423,10 @@ jobs:
 
       - name: Deploy web interface into image
         run: |
+          # Deploy non-Python Solver files only — Python scripts were already
+          # staged with correct permissions (755) and must not be overwritten.
           sudo find $GITHUB_WORKSPACE/Solver -maxdepth 1 -type f \
+              ! -name '*.py' \
               -exec sudo install -m 644 {} /mnt/pi/home/efinder/Solver/ \;
           if [ -d "$GITHUB_WORKSPACE/Solver/www" ]; then
               sudo cp -r $GITHUB_WORKSPACE/Solver/www/* /mnt/pi/var/www/html/ \
@@ -613,9 +599,15 @@ jobs:
           # Enable services
           WANTS=$ROOT/etc/systemd/system/multi-user.target.wants
           sudo mkdir -p "$WANTS"
+          # Custom units (written above) live in /etc/systemd/system/
           for SVC in cpu-performance wifi-powersave-off efinder-update efinder \
-                     apache2 smbd nmbd efinder-samba-firstboot; do
+                     efinder-samba-firstboot; do
               sudo ln -sf /etc/systemd/system/${SVC}.service \
+                  "$WANTS/${SVC}.service" 2>/dev/null || true
+          done
+          # System-provided units live in /lib/systemd/system/
+          for SVC in apache2 smbd nmbd; do
+              sudo ln -sf /lib/systemd/system/${SVC}.service \
                   "$WANTS/${SVC}.service" 2>/dev/null || true
           done
           sudo ln -sf /lib/systemd/system/ssh.service \
