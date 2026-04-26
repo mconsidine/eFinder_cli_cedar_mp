@@ -384,6 +384,10 @@ jobs:
           sudo cp -r cedar-solve /mnt/pi/home/efinder/src/cedar-solve
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
               --prefer-binary -e /home/efinder/src/cedar-solve
+          # grpcio is imported as 'grpc'; install explicitly as it may not be
+          # pulled in transitively when installing from an editable source tree.
+          sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
+              --prefer-binary grpcio
 
           # Place cedar-detect-server where CedarDetectClient() expects it:
           # <site-packages>/tetra3/bin/cedar-detect-server
