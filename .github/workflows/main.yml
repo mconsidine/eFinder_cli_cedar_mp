@@ -410,7 +410,7 @@ jobs:
           t3 = tetra3.Tetra3()
           hip_path = os.path.join(os.path.dirname(tetra3.__file__), 'hip_main.dat')
           t3.generate_database(
-              max_fov=14,
+              max_fov=11,
               save_as='t3_fov14_mag8',
               star_catalog=hip_path,
               star_max_magnitude=8.0,
