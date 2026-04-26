@@ -325,6 +325,48 @@ jobs:
               iw \
               unzip
 
+      # -----------------------------------------------------------------------
+      # cedar-solve: clone from source and install editable (no PyPI).
+      # Matches the approach in enhanced/tiny_cedar_v2 branches.
+      # Patch out all upper version bounds before installing so pip resolves
+      # freely against whatever numpy/Pillow versions are already present.
+      # Done on the host runner before the chroot steps.
+      # -----------------------------------------------------------------------
+      - name: Clone cedar-solve and patch version caps
+        run: |
+          git clone --depth 1 https://github.com/smroid/cedar-solve.git cedar-solve
+          echo "cedar-solve commit: $(git -C cedar-solve rev-parse HEAD)"
+          sed -i 's/,[[:space:]]*<[0-9][0-9.]*//g' cedar-solve/pyproject.toml
+          sed -i 's/[[:space:]]*<[0-9][0-9.]*//g'  cedar-solve/pyproject.toml
+          echo "Effective dependencies after patch:"
+          grep -A 20 'dependencies' cedar-solve/pyproject.toml | head -25
+
+      # -----------------------------------------------------------------------
+      # Generate gRPC Python stubs on the host (native speed, no QEMU).
+      # Staged into the image — no protoc or grpcio-tools needed on the Pi.
+      # -----------------------------------------------------------------------
+      - name: Generate Python gRPC stubs (host)
+        run: |
+          pip install grpcio-tools
+          python3 -m grpc_tools.protoc \
+            -I cedar-detect/src/proto \
+            --python_out=Solver \
+            --pyi_out=Solver \
+            --grpc_python_out=Solver \
+            cedar-detect/src/proto/cedar_detect.proto
+          ls -l Solver/cedar_detect_pb2*.py
+
+      # -----------------------------------------------------------------------
+      # Download Hipparcos catalogue on the host (fast, no QEMU).
+      # Staged into the image so generate_database() finds it inside chroot.
+      # -----------------------------------------------------------------------
+      - name: Download Hipparcos catalogue
+        run: |
+          curl -fL \
+            https://cdsarc.cds.unistra.fr/ftp/cats/I/239/hip_main.dat \
+            -o hip_main.dat
+          ls -lh hip_main.dat
+
       - name: Set up Python venv and install cedar-solve
         run: |
           sudo chroot /mnt/pi sudo -u efinder python3 -m venv \
@@ -334,21 +376,16 @@ jobs:
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
               --prefer-binary pyserial
 
-          # cedar-solve is a pure-Python wheel (py3-none-any) so installs fine.
-          # Its declared dependencies are numpy and grpcio.  numpy has no
-          # pre-built aarch64/Python 3.13 wheel on PyPI or piwheels, so letting
-          # pip resolve it freely causes a multi-hour source compile under QEMU.
-          # Avoid this by installing cedar-solve with --no-deps; numpy is already
-          # present via the system apt package (python3-numpy) and is visible to
-          # the venv through --system-site-packages.  Install grpcio explicitly;
-          # it has pre-built manylinux aarch64 wheels so --only-binary ensures a
-          # fast fail rather than a silent multi-hour compile if that ever changes.
+          # Install cedar-solve from the pre-cloned, version-cap-patched source
+          # in editable mode — same approach as enhanced/tiny_cedar_v2 branches.
+          # cedar-solve is pure Python so no compilation happens under QEMU.
+          # grpcio is the only binary dependency and has pre-built aarch64 wheels.
+          sudo mkdir -p /mnt/pi/home/efinder/src
+          sudo cp -r cedar-solve /mnt/pi/home/efinder/src/cedar-solve
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
-              --no-deps cedar-solve
-          sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
-              --only-binary :all: grpcio
+              --prefer-binary -e /home/efinder/src/cedar-solve
 
-          # Place the cedar-detect-server binary where CedarDetectClient() expects it:
+          # Place cedar-detect-server where CedarDetectClient() expects it:
           # <site-packages>/tetra3/bin/cedar-detect-server
           SITE=$(sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
               -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
@@ -358,31 +395,44 @@ jobs:
               /mnt/pi${SITE}/tetra3/bin/cedar-detect-server
           echo "  cedar-detect-server installed to ${SITE}/tetra3/bin/"
 
+          # Stage gRPC stubs generated on host above
+          sudo install -m 644 Solver/cedar_detect_pb2.py \
+              /mnt/pi/home/efinder/Solver/cedar_detect_pb2.py
+          sudo install -m 644 Solver/cedar_detect_pb2_grpc.py \
+              /mnt/pi/home/efinder/Solver/cedar_detect_pb2_grpc.py
+          sudo install -m 644 Solver/cedar_detect_pb2.pyi \
+              /mnt/pi/home/efinder/Solver/cedar_detect_pb2.pyi 2>/dev/null || true
+
           # Verify imports
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
               -c "from tetra3 import Tetra3, cedar_detect_client; print('cedar-solve ok')"
 
       - name: Generate cedar-solve star database in chroot
         run: |
-          # cedar-solve uses the same generate_database() API as tetra3.
-          # The database name (no extension) is passed to Tetra3() at runtime.
-          DB_PATH="/home/efinder/Solver/efinder-cedar-database"
+          # Place hip_main.dat where generate_database() finds it:
+          # inside the tetra3 package directory of the editable install.
+          TETRA3_PKG=$(sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
+              -c "import tetra3, os; print(os.path.dirname(tetra3.__file__))")
+          echo "tetra3 package dir: $TETRA3_PKG"
+          sudo install -m 644 hip_main.dat /mnt/pi${TETRA3_PKG}/hip_main.dat
 
+          # Database name 't3_fov14_mag8' matches Tetra3('t3_fov14_mag8') in
+          # the Python script. Written to <tetra3_pkg>/data/t3_fov14_mag8.npz.
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 -c "
-          from tetra3 import Tetra3
-          t3 = Tetra3()
+          import os, tetra3
+          t3 = tetra3.Tetra3(load_database=None)
+          hip_path = os.path.join(os.path.dirname(tetra3.__file__), 'hip_main.dat')
           t3.generate_database(
               max_fov=14,
-              min_fov=10,
-              pattern_stars_per_fov=10,
-              verification_stars_per_fov=50,
+              save_as='t3_fov14_mag8',
+              star_catalog=hip_path,
               star_max_magnitude=8.0,
-              epoch_proper_motion=2026,
           )
-          t3.save_database('${DB_PATH}')
-          print('Database saved to ${DB_PATH}')
+          print('Database generation complete.')
           "
+          sudo rm -f /mnt/pi${TETRA3_PKG}/hip_main.dat
           echo "  Star database baked into image."
+
 
       - name: Deploy web interface into image
         run: |

@@ -11,7 +11,7 @@
 # From migrating.rst in the cedar-solve repo, the canonical usage is:
 #
 #   from tetra3 import Tetra3, cedar_detect_client
-#   t3 = Tetra3('efinder-cedar-database')
+#   t3 = Tetra3('t3_fov14_mag8')
 #   cedar_detect = cedar_detect_client.CedarDetectClient()
 #   centroids = cedar_detect.extract_centroids(image, sigma=8, max_size=10, use_binned=True)
 #   solve_dict = t3.solve_from_centroids(centroids, fov_estimate=13.5)
@@ -314,10 +314,10 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
     # ------------------------------------------------------------------
     from tetra3 import Tetra3, cedar_detect_client
 
-    DB_NAME = 'efinder-cedar-database'
-    DB_PATH = os.path.join(home_path, 'Solver', DB_NAME)
+    # 't3_fov14_mag8' is a bare name; Tetra3 resolves it to
+    # <tetra3_pkg>/data/t3_fov14_mag8.npz in the editable install.
     print('[solver] loading cedar-solve database...')
-    t3 = Tetra3(DB_PATH)
+    t3 = Tetra3('t3_fov14_mag8')
     print('[solver] cedar-solve database loaded')
 
     # CedarDetectClient() locates and starts cedar-detect-server automatically.
