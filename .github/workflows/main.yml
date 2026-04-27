@@ -18,6 +18,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create GitHub releases
     steps:
 
       - name: Checkout repo
