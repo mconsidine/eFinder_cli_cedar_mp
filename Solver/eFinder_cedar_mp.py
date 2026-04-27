@@ -5,20 +5,14 @@
 # Simplified: direct picamera2, no Nexus, no GPIO, no LED, no WiFi switching
 #
 # Cedar edition — replaces tetra3rs (Rust, in-process) with:
-#   cedar-detect : Rust binary invoked via cedar_detect_client (bundled in cedar-solve)
+#   cedar-detect : Rust gRPC server binary (/usr/local/bin/cedar-detect-server)
+#                  called via raw gRPC on localhost:50051 using pb2 stubs
 #   cedar-solve  : Python fork of tetra3, imported as `tetra3`
 #
-# From migrating.rst in the cedar-solve repo, the canonical usage is:
-#
-#   from tetra3 import Tetra3, cedar_detect_client
-#   t3 = Tetra3('t3_fov14_mag8')
-#   cedar_detect = cedar_detect_client.CedarDetectClient()
-#   centroids = cedar_detect.extract_centroids(image, sigma=8, max_size=10, use_binned=True)
-#   solve_dict = t3.solve_from_centroids(centroids, fov_estimate=13.5)
-#
-# CedarDetectClient() starts and manages the cedar-detect-server binary itself;
-# no subprocess or gRPC plumbing is needed in user code.
-# The binary must be at <cedar-solve-install>/tetra3/bin/cedar-detect-server.
+# cedar-detect is started as a subprocess by the solver process and called
+# via grpc.insecure_channel('localhost:50051').  The pb2 stubs
+# (cedar_detect_pb2, cedar_detect_pb2_grpc) must be present in the tetra3
+# source directory (~/src/cedar-solve/tetra3/).
 #
 # solve_from_centroids returns a dict with keys:
 #   'RA', 'Dec', 'Roll', 'FOV', 'matched_stars', ...
@@ -279,16 +273,9 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
                    shared_ra, shared_dec, offset_flag, test_mode,
                    latest_slot, frame_seq):
     """
-    Uses cedar-solve (imported as `tetra3`) for plate solving and
-    cedar_detect_client.CedarDetectClient() for centroid extraction.
-
-    CedarDetectClient manages the cedar-detect-server binary itself —
-    no subprocess or gRPC setup needed here.  The binary must be at:
-        <cedar-solve-install>/tetra3/bin/cedar-detect-server
-
-    extract_centroids() returns an Nx2 numpy array of (y, x) centroids,
-    brightest first, in top-left-origin pixel coordinates — exactly what
-    solve_from_centroids() expects.
+    Uses cedar-solve (imported as `tetra3`) for plate solving.
+    cedar-detect-server is started as a subprocess and called via gRPC
+    on localhost:50051 using the pb2 stubs in the tetra3 source directory.
 
     solve_from_centroids() returns a dict {'RA', 'Dec', 'Roll', 'FOV',
     'matched_stars', ...} or {} on failure.
@@ -312,7 +299,10 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
     # ------------------------------------------------------------------
     # cedar-solve + cedar-detect setup
     # ------------------------------------------------------------------
-    from tetra3 import Tetra3, cedar_detect_client
+    import grpc
+    import subprocess as _subprocess
+    from tetra3 import Tetra3
+    from tetra3 import cedar_detect_pb2, cedar_detect_pb2_grpc
 
     # 't3_fov14_mag8' is a bare name; Tetra3 resolves it to
     # <tetra3_pkg>/data/t3_fov14_mag8.npz in the editable install.
@@ -320,9 +310,21 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
     t3 = Tetra3('t3_fov14_mag8')
     print('[solver] cedar-solve database loaded')
 
-    # CedarDetectClient() locates and starts cedar-detect-server automatically.
-    cedar_detect = cedar_detect_client.CedarDetectClient()
-    print('[solver] cedar-detect client ready')
+    # Start cedar-detect-server as a subprocess on localhost:50051.
+    CEDAR_DETECT_BIN = '/usr/local/bin/cedar-detect-server'
+    _cedar_proc = _subprocess.Popen(
+        [CEDAR_DETECT_BIN, '--port', '50051'],
+        stdout=_subprocess.DEVNULL,
+        stderr=_subprocess.DEVNULL,
+    )
+    time.sleep(1.0)   # allow server to bind
+
+    def _make_cd_stub():
+        channel = grpc.insecure_channel('localhost:50051')
+        return cedar_detect_pb2_grpc.CedarDetectStub(channel)
+
+    _cd_stub = _make_cd_stub()
+    print('[solver] cedar-detect gRPC client ready (pid %d)' % _cedar_proc.pid)
 
     try:
         fnt = ImageFont.truetype(os.path.join(home_path, "Solver/text.ttf"), 16)
@@ -490,32 +492,43 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
             keep = False; frame_n = 0
 
     # ------------------------------------------------------------------
-    # Centroid extraction via CedarDetectClient
+    # Centroid extraction via cedar-detect gRPC
     # ------------------------------------------------------------------
     def _extract_centroids(np_img):
         """Return (centroids_Nx2_yx, img_peak_int).
 
-        cedar_detect.extract_centroids() takes a numpy uint8 array and
-        returns an Nx2 float array [[y0,x0],[y1,x1],...] sorted brightest
-        first, top-left origin.
-
-        Parameters from migrating.rst example:
-            sigma=8          — detection threshold in noise units
-            max_size=10      — max star radius in pixels
-            use_binned=True  — 2x2 binning before detection (faster, less noise)
+        Proto: CentroidsRequest -> CentroidsResult via ExtractCentroids RPC.
+        Image is passed as an Image sub-message (width, height, image_data).
+        use_binned_for_star_candidates=True applies 2x2 binning internally
+        before finding candidates; centroids are reported in full-res coords.
+        detect_hot_pixels=True prevents hot pixels being mistaken for stars.
+        peak_star_pixel is returned directly by the server — no local compute.
+        StarCentroid.centroid_position is ImageCoord with .x (col) and .y (row).
+        Results are already ordered brightest first.
         """
         try:
-            centroids = cedar_detect.extract_centroids(
-                np_img, sigma=8, max_size=10, use_binned=True)
-            if centroids is None or len(centroids) == 0:
+            req = cedar_detect_pb2.CentroidsRequest(
+                input_image=cedar_detect_pb2.Image(
+                    width=FRAME_W,
+                    height=FRAME_H,
+                    image_data=np_img.tobytes(),
+                ),
+                sigma=8,
+                use_binned_for_star_candidates=True,
+                detect_hot_pixels=True,
+            )
+            resp = _cd_stub.ExtractCentroids(req, timeout=2.0)
+            stars_raw = list(resp.star_candidates)
+            if not stars_raw:
                 return np.empty((0, 2), dtype=np.float32), 0
-            # Peak: 5x5 window around brightest centroid
-            row0 = int(round(centroids[0, 0]))
-            col0 = int(round(centroids[0, 1]))
-            r0, r1 = max(0, row0 - 2), min(FRAME_H, row0 + 3)
-            c0, c1 = max(0, col0 - 2), min(FRAME_W, col0 + 3)
-            img_peak = int(np_img[r0:r1, c0:c1].max()) if r1 > r0 and c1 > c0 else 0
-            return centroids.astype(np.float32), img_peak
+            # centroid_position: x=col, y=row, top-left origin.
+            # cedar-solve expects (y, x) ordering.
+            centroids = np.array(
+                [[s.centroid_position.y, s.centroid_position.x]
+                 for s in stars_raw],
+                dtype=np.float32)
+            img_peak = resp.peak_star_pixel
+            return centroids, img_peak
         except Exception as e:
             print('[solver] cedar-detect error:', e)
             return np.empty((0, 2), dtype=np.float32), 0
@@ -806,6 +819,17 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
                 lx200_result_q.put((cmd, result))
         except Exception:
             pass
+
+        # Restart cedar-detect-server if it died
+        if _cedar_proc.poll() is not None:
+            print('[solver] cedar-detect-server died — restarting')
+            _cedar_proc = _subprocess.Popen(
+                [CEDAR_DETECT_BIN, '--port', '50051'],
+                stdout=_subprocess.DEVNULL,
+                stderr=_subprocess.DEVNULL,
+            )
+            time.sleep(1.0)
+            _cd_stub = _make_cd_stub()
 
         if frame_ready.wait(timeout=0.5) and not offset_flag.value:
             frame_ready.clear()

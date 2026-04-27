@@ -348,6 +348,21 @@ jobs:
           grep -A 20 'dependencies' cedar-solve/pyproject.toml | head -25
 
       # -----------------------------------------------------------------------
+      # Generate gRPC Python stubs on the host (native speed, no QEMU).
+      # cedar_detect_client.py imports cedar_detect_pb2 / cedar_detect_pb2_grpc
+      # at module load time — these must be present at runtime.
+      # -----------------------------------------------------------------------
+      - name: Generate Python gRPC stubs (host)
+        run: |
+          pip install grpcio-tools
+          python3 -m grpc_tools.protoc \
+            -I cedar-detect/src/proto \
+            --python_out=Solver \
+            --grpc_python_out=Solver \
+            cedar-detect/src/proto/cedar_detect.proto
+          ls -l Solver/cedar_detect_pb2*.py
+
+      # -----------------------------------------------------------------------
       # Download Hipparcos catalogue on the host (fast, no QEMU).
       # Staged into the image so generate_database() finds it inside chroot.
       # -----------------------------------------------------------------------
@@ -380,17 +395,19 @@ jobs:
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
               --prefer-binary grpcio protobuf
 
-          # Place cedar-detect-server where CedarDetectClient() expects it.
-          # For an editable install, tetra3.__file__ resolves into the cloned
-          # source tree, not site-packages, so use tetra3.__file__ to locate bin/.
-          TETRA3_DIR=$(sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
-              -c "import tetra3, os; print(os.path.dirname(tetra3.__file__))")
-          echo "  tetra3 dir: $TETRA3_DIR"
-          sudo mkdir -p /mnt/pi${TETRA3_DIR}/bin
+          # Install cedar-detect-server to /usr/local/bin/ — matches the
+          # enhanced branch install-cedar.sh approach.
           sudo install -m 755 \
               /mnt/pi/home/efinder/cedar-detect-bin/cedar-detect-server \
-              /mnt/pi${TETRA3_DIR}/bin/cedar-detect-server
-          echo "  cedar-detect-server installed to ${TETRA3_DIR}/bin/"
+              /mnt/pi/usr/local/bin/cedar-detect-server
+          echo "  cedar-detect-server installed to /usr/local/bin/"
+
+          # Stage gRPC stubs — cedar_detect_client.py imports these at module
+          # load time so they must be present in the tetra3 source directory.
+          sudo install -m 644 Solver/cedar_detect_pb2.py \
+              /mnt/pi/home/efinder/src/cedar-solve/tetra3/cedar_detect_pb2.py
+          sudo install -m 644 Solver/cedar_detect_pb2_grpc.py \
+              /mnt/pi/home/efinder/src/cedar-solve/tetra3/cedar_detect_pb2_grpc.py
 
           # Verify imports
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
