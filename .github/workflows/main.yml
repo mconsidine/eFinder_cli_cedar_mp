@@ -14,12 +14,26 @@ on:
         description: 'WiFi regulatory country code (ISO 3166-1 alpha-2)'
         required: false
         default: 'US'
+      prebuilt_database:
+        description: 'Use prebuilt database from repo instead of generating (true/false)'
+        required: false
+        default: 'false'
+      prebuilt_database_file:
+        description: 'Filename of prebuilt .npz in repo root (e.g. t3_fov14_mag8.npz)'
+        required: false
+        default: 't3_fov14_mag8.npz'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # required to create GitHub releases
+    env:
+      # Set to 'true' to skip Hipparcos download and generate_database, and
+      # instead copy a pre-built .npz from the repo root into the image.
+      # Controlled by workflow_dispatch input; defaults to false on push.
+      USE_PREBUILT_DB: ${{ github.event.inputs.prebuilt_database || 'false' }}
+      PREBUILT_DB_FILE: ${{ github.event.inputs.prebuilt_database_file || 't3_fov14_mag8.npz' }}
     steps:
 
       - name: Checkout repo
@@ -369,9 +383,10 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Download Hipparcos catalogue on the host (fast, no QEMU).
-      # Staged into the image so generate_database() finds it inside chroot.
+      # Skipped when USE_PREBUILT_DB=true.
       # -----------------------------------------------------------------------
       - name: Download Hipparcos catalogue
+        if: env.USE_PREBUILT_DB != 'true'
         run: |
           curl -fL \
             https://cdsarc.cds.unistra.fr/ftp/cats/I/239/hip_main.dat \
@@ -419,6 +434,7 @@ jobs:
               -c "from tetra3 import Tetra3, cedar_detect_client; print('cedar-solve ok')"
 
       - name: Generate cedar-solve star database in chroot
+        if: env.USE_PREBUILT_DB != 'true'
         run: |
           # Place hip_main.dat where generate_database() finds it:
           # inside the tetra3 package directory of the editable install.
@@ -445,6 +461,26 @@ jobs:
           sudo rm -f /mnt/pi${TETRA3_PKG}/hip_main.dat
           echo "  Star database baked into image."
 
+      - name: Copy prebuilt database into image
+        if: env.USE_PREBUILT_DB == 'true'
+        run: |
+          # Verify the prebuilt file exists in the repo root
+          if [ ! -f "$PREBUILT_DB_FILE" ]; then
+            echo "ERROR: prebuilt database '$PREBUILT_DB_FILE' not found in repo root"
+            exit 1
+          fi
+          ls -lh "$PREBUILT_DB_FILE"
+
+          # Find the tetra3 data directory inside the editable install and
+          # copy the prebuilt .npz there as t3_fov14_mag8.npz — the same
+          # filename that Tetra3('t3_fov14_mag8') resolves to at runtime.
+          TETRA3_PKG=$(sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 \
+              -c "import tetra3, os; print(os.path.dirname(tetra3.__file__))")
+          echo "tetra3 package dir: $TETRA3_PKG"
+          sudo mkdir -p /mnt/pi${TETRA3_PKG}/data
+          sudo install -m 644 "$PREBUILT_DB_FILE" \
+              /mnt/pi${TETRA3_PKG}/data/t3_fov14_mag8.npz
+          echo "  Prebuilt database installed to ${TETRA3_PKG}/data/t3_fov14_mag8.npz"
 
       - name: Deploy web interface into image
         run: |
