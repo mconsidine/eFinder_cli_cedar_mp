@@ -41,8 +41,8 @@ jobs:
 
       # -----------------------------------------------------------------------
       # cedar-detect: cross-compile cedar-detect-server for aarch64.
-      # Per migrating.rst, the binary goes inside the cedar-solve package tree
-      # at tetra3/bin/cedar-detect-server so CedarDetectClient() finds it.
+      # Installed to /usr/local/bin/ on the Pi; started as a subprocess by
+      # the solver process and called via gRPC on localhost:50051.
       # -----------------------------------------------------------------------
       - name: Install Rust toolchain
         run: |
@@ -360,6 +360,11 @@ jobs:
             --python_out=Solver \
             --grpc_python_out=Solver \
             cedar-detect/src/proto/cedar_detect.proto
+          # The grpc stub does a bare 'import cedar_detect_pb2' which fails
+          # when both files live inside a package directory (tetra3/).
+          # Patch it to use a relative import so it works from any location.
+          sed -i 's/^import cedar_detect_pb2/from tetra3 import cedar_detect_pb2/' \
+              Solver/cedar_detect_pb2_grpc.py
           ls -l Solver/cedar_detect_pb2*.py
 
       # -----------------------------------------------------------------------
@@ -389,7 +394,7 @@ jobs:
           sudo mkdir -p /mnt/pi/home/efinder/src
           sudo cp -r cedar-solve /mnt/pi/home/efinder/src/cedar-solve
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
-              --prefer-binary -e /home/efinder/src/cedar-solve
+              -e /home/efinder/src/cedar-solve
           # grpcio is imported as 'grpc'; install explicitly as it may not be
           # pulled in transitively when installing from an editable source tree.
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
@@ -426,6 +431,7 @@ jobs:
           # the Python script. Written to <tetra3_pkg>/data/t3_fov14_mag8.npz.
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/python3 -c "
           import os, tetra3
+          os.chdir('/tmp')  # must not run from inside tetra3 source tree
           t3 = tetra3.Tetra3()
           hip_path = os.path.join(os.path.dirname(tetra3.__file__), 'hip_main.dat')
           t3.generate_database(
@@ -658,6 +664,8 @@ jobs:
           sudo chroot /mnt/pi /usr/sbin/update-locale LANG=en_US.UTF-8
 
           sudo find /mnt/pi/home/efinder/venv-efinder -name '__pycache__' \
+              -exec rm -rf {} + 2>/dev/null || true
+          sudo find /mnt/pi/home/efinder/src -name '__pycache__' \
               -exec rm -rf {} + 2>/dev/null || true
 
           # Clean up staging directory for cedar-detect binary
