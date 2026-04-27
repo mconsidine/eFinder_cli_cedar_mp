@@ -314,20 +314,32 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
     print('[solver] cedar-solve database loaded')
 
     # Start cedar-detect-server as a subprocess on localhost:50051.
+    # stderr goes to journal (not DEVNULL) so startup failures are visible.
     CEDAR_DETECT_BIN = '/usr/local/bin/cedar-detect-server'
-    _cedar_proc = _subprocess.Popen(
-        [CEDAR_DETECT_BIN, '--port', '50051'],
-        stdout=_subprocess.DEVNULL,
-        stderr=_subprocess.DEVNULL,
-    )
-    time.sleep(1.0)   # allow server to bind
+    CEDAR_DETECT_PORT = '50051'
+
+    def _start_cedar_detect():
+        proc = _subprocess.Popen(
+            [CEDAR_DETECT_BIN, '--port', CEDAR_DETECT_PORT],
+            stdout=_subprocess.DEVNULL,
+            stderr=None,   # inherit — goes to journal via systemd
+        )
+        time.sleep(1.0)   # allow server to bind
+        # Check it actually started
+        if proc.poll() is not None:
+            print('[solver] cedar-detect-server exited immediately (rc=%d) '
+                  '— check binary and --port flag' % proc.returncode)
+        else:
+            print('[solver] cedar-detect-server started (pid %d)' % proc.pid)
+        return proc
 
     def _make_cd_stub():
-        channel = grpc.insecure_channel('localhost:50051')
+        channel = grpc.insecure_channel('localhost:' + CEDAR_DETECT_PORT)
         return cedar_detect_pb2_grpc.CedarDetectStub(channel)
 
+    _cedar_proc = _start_cedar_detect()
     _cd_stub = _make_cd_stub()
-    print('[solver] cedar-detect gRPC client ready (pid %d)' % _cedar_proc.pid)
+    print('[solver] cedar-detect gRPC client ready')
 
     try:
         fnt = ImageFont.truetype(os.path.join(home_path, "Solver/text.ttf"), 16)
@@ -520,7 +532,7 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
                 use_binned_for_star_candidates=True,
                 detect_hot_pixels=True,
             )
-            resp = _cd_stub.ExtractCentroids(req, timeout=2.0)
+            resp = _cd_stub_ref[0].ExtractCentroids(req, timeout=2.0)
             stars_raw = list(resp.star_candidates)
             if not stars_raw:
                 return np.empty((0, 2), dtype=np.float32), 0
@@ -814,6 +826,10 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
 
     print('[solver] ready, entering main loop')
 
+    # _cedar_proc and _cd_stub are rebound in the watchdog below
+    _cedar_proc_ref = [_cedar_proc]
+    _cd_stub_ref    = [_cd_stub]
+
     while True:
         try:
             while True:
@@ -824,15 +840,10 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
             pass
 
         # Restart cedar-detect-server if it died
-        if _cedar_proc.poll() is not None:
+        if _cedar_proc_ref[0].poll() is not None:
             print('[solver] cedar-detect-server died — restarting')
-            _cedar_proc = _subprocess.Popen(
-                [CEDAR_DETECT_BIN, '--port', '50051'],
-                stdout=_subprocess.DEVNULL,
-                stderr=_subprocess.DEVNULL,
-            )
-            time.sleep(1.0)
-            _cd_stub = _make_cd_stub()
+            _cedar_proc_ref[0] = _start_cedar_detect()
+            _cd_stub_ref[0]    = _make_cd_stub()
 
         if frame_ready.wait(timeout=0.5) and not offset_flag.value:
             frame_ready.clear()
