@@ -376,7 +376,7 @@ jobs:
           # grpcio is imported as 'grpc'; install explicitly as it may not be
           # pulled in transitively when installing from an editable source tree.
           sudo chroot /mnt/pi /home/efinder/venv-efinder/bin/pip install \
-              --prefer-binary grpcio
+              --prefer-binary grpcio protobuf
 
           # Place cedar-detect-server where CedarDetectClient() expects it.
           # For an editable install, tetra3.__file__ resolves into the cloned
