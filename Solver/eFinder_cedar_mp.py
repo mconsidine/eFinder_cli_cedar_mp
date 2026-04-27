@@ -161,8 +161,11 @@ def _offset_target_pixel(param):
 # ---------------------------------------------------------------------------
 # CPU affinity helper
 # ---------------------------------------------------------------------------
+# Pi Zero 2W has 4 cores (0-3). Main process must set its own affinity to
+# all cores before forking so children inherit the full set, then each
+# child restricts itself further via _pin_cpu().
 CPU_PINNING = {
-    'main':   {0},
+    'main':   {0, 1, 2, 3},
     'camera': {0},
     'lx200':  {1},
     'solver': {2, 3},
@@ -577,7 +580,7 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
 
         eTime = ('%2.2f' % (time.time() - t0)).zfill(5)
 
-        if not result or 'RA' not in result:
+        if not result or 'RA' not in result or result['RA'] is None or result['Dec'] is None:
             solve = False
             if keep:
                 _save_debug(img, "Not Solved - %s stars  Exp=%ss Gain=%s" % (
@@ -587,8 +590,8 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
         result_last    = result
         centroids_last = centroids
 
-        ra_j2000  = result['RA']
-        dec_j2000 = result['Dec']
+        ra_j2000  = float(result['RA'])
+        dec_j2000 = float(result['Dec'])
         _update_fov(result.get('FOV'))
 
         if keep:
