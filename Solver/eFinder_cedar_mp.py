@@ -161,14 +161,16 @@ def _offset_target_pixel(param):
 # ---------------------------------------------------------------------------
 # CPU affinity helper
 # ---------------------------------------------------------------------------
-# Pi Zero 2W has 4 cores (0-3). Main process must set its own affinity to
-# all cores before forking so children inherit the full set, then each
-# child restricts itself further via _pin_cpu().
+# Pi Zero 2W has 4x Cortex-A53 (cores 0-3).
+# Children can sched_setaffinity to any core in the system cpuset regardless
+# of what affinity mask they inherited at fork() — so main stays on {0}.
+# cedar-detect-server is started after _pin_cpu('solver') runs so it
+# inherits {2,3} and stays off the lx200's core {1}.
 CPU_PINNING = {
-    'main':   {0, 1, 2, 3},
-    'camera': {0},
-    'lx200':  {1},
-    'solver': {2, 3},
+    'main':   {0},      # supervisor — idle most of the time
+    'camera': {0},      # light work, shares with USB/SDIO IRQs
+    'lx200':  {1},      # isolated so SkySafari replies never queue
+    'solver': {2, 3},   # heavy: solve loop + state thread + live-jpeg thread
 }
 
 def _pin_cpu(label):
@@ -283,6 +285,8 @@ def solver_process(shm_names, frame_ready, cam_cmd_q, cam_result_q,
     solve_from_centroids() returns a dict {'RA', 'Dec', 'Roll', 'FOV',
     'matched_stars', ...} or {} on failure.
     """
+    # Pin CPU first — cedar-detect-server is started after this so it
+    # inherits {2,3} and stays off lx200's core {1}.
     _pin_cpu('solver')
     import serial as _pyserial
     from threading import Thread as _Thread, Lock as _Lock
